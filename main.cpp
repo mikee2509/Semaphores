@@ -194,7 +194,10 @@ int main(void) {
     cout << "! ======================END OF SIMULATION====================== !" << endl;
     cout << "Elements left in buffer: " << buffer.size() << endl;
 
-    delete timeP, timeA, timeB, timeC;
+    delete timeP;
+    delete timeA;
+    delete timeB;
+    delete timeC;
 
     return 0;
 }
