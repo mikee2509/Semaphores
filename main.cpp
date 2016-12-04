@@ -1,9 +1,11 @@
 #include <iostream>
 #include <pthread.h>
 #include <queue>
+#include <deque>
 #include <unistd.h>
-#include "monitor.h"
+#include "semaphore.h"
 #include "main.h"
+#include "iterable_queue.h"
 
 //Buffer capacity
 #define MAX_BUFFER  9
@@ -12,9 +14,9 @@
 #define NUM_PRODUCED  50
 
 //Number of times a consumer attempts to access a product
-#define NUM_ATTEMPTS_A 40
+#define NUM_ATTEMPTS_A 20
 #define NUM_ATTEMPTS_B 20
-#define NUM_ATTEMPTS_C 30
+#define NUM_ATTEMPTS_C 20
 
 //Consumers' and producer's sleep times in miliseconds
 #define TIME_A  100
@@ -32,146 +34,193 @@ struct Product
     Product() : id(0), who_read('N') {}
 };
 
-queue<Product> buffer; //Buffer is a FIFO queue
 
-Semaphore mutex(1),          //mutual exclusion for critical region
-          full(0),           //buffer overfill watch
-          empty(MAX_BUFFER); //buffer empty watch
+iterable_queue<Product> buffer;  //Buffer is a FIFO queue
+bool isProducerWorking = false;  //Used only for better printing
 
 
-void* produce(void *ptr) {
+Semaphore full(0),            //counts the number of slots that are full in buffer
+          empty(MAX_BUFFER);  //counts the number of slots that are empty in buffer
+          
 
+Mutex cregion,  //mutual exclusion for critical region
+	  blockA,   //blocking consumer A
+	  blockB,   //blocking consumer B
+	  blockC;   //blocking consumer C
+
+          
+const char indent[] = "                                   ";
+
+
+void printBuffer()
+{
+    cout << "BUFFER: ";
+    for(auto it=buffer.begin(); it!=buffer.end(); ++it)
+        cout << it->id << " ";
+    cout << endl;
+}
+
+
+void* produce(void *ptr) 
+{
     unsigned sleep_time = *((unsigned*) ptr); //Sleep time in miliseconds
-    Product temp;
+    Product new_product;
+
+    cregion.p();
+        isProducerWorking = true;
+    cregion.v();
 
     for (int i = 1; i <= NUM_PRODUCED; ++ i) {
         usleep(sleep_time * 1000); //int usleep(useconds_t microseconds);
         
-        temp.id = i;
+        new_product.id = i;
 
         empty.p();
-        mutex.p();
+        cregion.p();
 
-        buffer.push(temp);
-        cout << "Produced element:    " << i << endl;
-        cout << "Current buffer size: " << buffer.size() << endl;
+        buffer.push(new_product);
+        cout << "PRODUCED ELEMENT:  " << i << endl;
+        //cout << "Current buffer size: " << buffer.size() << endl;
+        printBuffer();
 
-        mutex.v();
+        cregion.v();
         full.v();
     }
-    cout << "\n**********************PRODUCER THREAD ENDS**********************\n" 
-        << endl;
+
+    cregion.p();
+        isProducerWorking = false;
+    cregion.v();
+    cout << "\n**********************PRODUCER THREAD ENDS**********************\n" << endl;
 }
 
 
-void* consume(void *ptr) {
-
+void* consume(void *ptr) 
+{
     unsigned sleep_time = *((unsigned*) ptr); //Sleep time in miliseconds
     char consumer_id;
     switch (sleep_time) {
     	case TIME_A: 
     		consumer_id = 'A';
-            readAB(sleep_time, consumer_id);
+            readA(sleep_time, consumer_id);
     		break;
     	case TIME_B: 
     		consumer_id = 'B';
-            readAB(sleep_time, consumer_id);
+            readB(sleep_time, consumer_id);
     		break;
 		case TIME_C: 
     		consumer_id = 'C';
             readC(sleep_time, consumer_id);
     		break;
     	default:
-    		cout << "THIS SHOULD NEVER HAPPEN" << endl; ///TODO: change to throw here
+    		throw runtime_error("Wrong argument in consume()");
     }
     cout << "\n*********************COMSUMER " << consumer_id << " THREAD ENDS**********************\n\n";
 }
 
-void indent() { 
-    cout << "                           "; 
-}
 
-void readAB(unsigned &sleep_time, char &consumer_id)
+void readA(unsigned &sleep_time, char &consumer_id)
 {
-    int num = consumer_id == 'A' ? NUM_ATTEMPTS_A : NUM_ATTEMPTS_B; 
-    for(int i = 1; i <= num; ++i) {
+    for(int i = 1; i <= NUM_ATTEMPTS_A; ++i) {
         usleep(sleep_time * 1000); //int usleep(useconds_t microseconds);
 
+        cout << indent << "   " << consumer_id << " wants to read: " << buffer.front().id << endl;
+
+        blockC.try_p();
+        blockA.p();
         full.p();
-        mutex.p();
-
-        char arb = buffer.front().who_read; //arb- already read by
+        cregion.p();
         
-        if(arb == 'A' || arb == 'B') {
-            if(arb == consumer_id) {
-                indent();
-                cout << "COMSUMER " << consumer_id << " could NOT read product: " 
-                    << buffer.front().id << endl;
+        if(buffer.front().who_read == 'B') {
+            cout << indent << consumer_id << " READ & DELETED PRODUCT: " << buffer.front().id << endl;
+            buffer.pop();
+            if(!isProducerWorking) printBuffer();
 
-                mutex.v();
-                full.v();
-            }
-            else {
-                indent();
-                cout << "COMSUMER " << consumer_id << " read & deleted product: " 
-                    << buffer.front().id << endl;
-                buffer.pop();
-                //indent();
-                //cout << "Current buffer size: " << buffer.size() << endl;
-            
-
-                mutex.v();
-                empty.v();
-            }
+            cregion.v();
+            empty.v();
+            blockB.v();
+            blockA.v();
+            blockC.v();
         }
         else {
-            buffer.front().who_read = consumer_id;
-            indent();
-            cout << "COMSUMER " << consumer_id << " read product: " 
+        	buffer.front().who_read = consumer_id;
+            cout << indent << consumer_id << " READ PRODUCT: " 
                 << buffer.front().id << endl;
-            mutex.v();
+
+            cregion.v();
+            full.v();
+            
+        }
+    }
+}
+
+
+void readB(unsigned &sleep_time, char &consumer_id)
+{
+    for(int i = 1; i <= NUM_ATTEMPTS_B; ++i) {
+        usleep(sleep_time * 1000); //int usleep(useconds_t microseconds);
+        
+        cout << indent << "   " << consumer_id << " wants to read: " << buffer.front().id << endl;
+
+        blockC.try_p();
+        blockB.p();
+        full.p();
+        cregion.p();
+        
+        if(buffer.front().who_read == 'A') {
+            cout << indent << consumer_id << " READ & DELETED PRODUCT: " << buffer.front().id << endl;
+            buffer.pop();
+            if(!isProducerWorking) printBuffer();
+
+            cregion.v();
+            empty.v();
+            blockA.v();
+            blockB.v();
+        	blockC.v();
+        }
+        else {
+        	buffer.front().who_read = consumer_id;
+            cout << indent << consumer_id << " READ PRODUCT: " << buffer.front().id << endl;
+
+            cregion.v();
             full.v();
         }
     }
 }
+
 
 void readC(unsigned &sleep_time, char &consumer_id)
 {
     for(int i = 1; i <= NUM_ATTEMPTS_C; ++i) {
         usleep(sleep_time * 1000); //int usleep(useconds_t microseconds);
         
+        cout << indent << "   " << consumer_id << " wants to read: " << buffer.front().id << endl;
+
+        blockC.p();
         full.p();
-        mutex.p();
+        cregion.p();
 
-        char arb = buffer.front().who_read; //arb- already read by
-        
-        //N stands for nobody
-        if(arb == 'N') {
-            indent();
-            cout << "COMSUMER " << consumer_id << " read & deleted product: " 
-                << buffer.front().id << endl;
-            buffer.pop();
-            //indent();
-            //cout << "Current buffer size: " << buffer.size() << endl;
-
-
-            mutex.v();
-            empty.v();
-        }
+        char arb = buffer.front().who_read;
+        if(arb == 'A' || arb == 'B') {
+        	cout << indent << "   " << consumer_id << " was declined access to: " << buffer.front().id << endl;
+        	
+            cregion.v();
+	        full.v();
+        } 
         else {
-            indent();
-            cout << "COMSUMER " << consumer_id << " could NOT read product: " 
-                << buffer.front().id << endl;
+	        cout << indent << consumer_id << " READ & DELETED PRODUCT: " << buffer.front().id << endl;
+	        buffer.pop();
+            if(!isProducerWorking) printBuffer();
 
-            mutex.v();
-            full.v();
-        }
-        mutex.v();
+	        cregion.v();
+	        empty.v();
+    	}
+
+        blockC.v();
     }
 }
 
-int main(void) {
-
+int main(void) 
+{
     pthread_t producer, consumerA, consumerB, consumerC;
 
     unsigned *timeP = new unsigned(TIME_P),

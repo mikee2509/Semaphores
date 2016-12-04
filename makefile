@@ -1,5 +1,5 @@
-semafory: main.cpp monitor.h
-	g++ -pthread main.cpp -o semafory
+run: main.cpp semaphore.h main.h iterable_queue.h
+	g++ -std=c++11 -pthread main.cpp -o run
 
 clean:
-	rm semafory
+	rm run
